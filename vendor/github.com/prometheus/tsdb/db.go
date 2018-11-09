@@ -45,6 +45,7 @@ import (
 // millisecond precision timestamps.
 var DefaultOptions = &Options{
 	WALFlushInterval:  5 * time.Second,
+	WALSegmentSize:    wal.DefaultSegmentSize,
 	RetentionDuration: 15 * 24 * 60 * 60 * 1000, // 15 days in milliseconds
 	BlockRanges:       ExponentialBlockRanges(int64(2*time.Hour)/1e6, 3, 5),
 	NoLockfile:        false,
@@ -54,6 +55,9 @@ var DefaultOptions = &Options{
 type Options struct {
 	// The interval at which the write ahead log is flushed to disk.
 	WALFlushInterval time.Duration
+
+	// Segments (wal files) max size
+	WALSegmentSize int
 
 	// Duration of persisted data to keep.
 	RetentionDuration uint64
@@ -254,7 +258,11 @@ func Open(dir string, l log.Logger, r prometheus.Registerer, opts *Options) (db 
 		return nil, errors.Wrap(err, "create leveled compactor")
 	}
 
-	wlog, err := wal.New(l, r, filepath.Join(dir, "wal"))
+	segmentSize := wal.DefaultSegmentSize
+	if opts.WALSegmentSize != 0 {
+		segmentSize = opts.WALSegmentSize
+	}
+	wlog, err := wal.NewSize(l, r, filepath.Join(dir, "wal"), segmentSize)
 	if err != nil {
 		return nil, err
 	}
@@ -793,7 +801,11 @@ func (db *DB) Querier(mint, maxt int64) (Querier, error) {
 		}
 	}
 	if maxt >= db.head.MinTime() {
-		blocks = append(blocks, db.head)
+		blocks = append(blocks, &rangeHead{
+			head: db.head,
+			mint: mint,
+			maxt: maxt,
+		})
 	}
 
 	sq := &querier{
@@ -876,6 +888,49 @@ func (db *DB) CleanTombstones() (err error) {
 		}
 	}
 	return errors.Wrap(db.reload(), "reload blocks")
+}
+
+// labelNames returns all the unique label names from the Block Readers.
+func labelNames(brs ...BlockReader) (map[string]struct{}, error) {
+	labelNamesMap := make(map[string]struct{})
+	for _, br := range brs {
+		ir, err := br.Index()
+		if err != nil {
+			return nil, errors.Wrap(err, "get IndexReader")
+		}
+		names, err := ir.LabelNames()
+		if err != nil {
+			return nil, errors.Wrap(err, "LabelNames() from IndexReader")
+		}
+		for _, name := range names {
+			labelNamesMap[name] = struct{}{}
+		}
+		if err = ir.Close(); err != nil {
+			return nil, errors.Wrap(err, "close IndexReader")
+		}
+	}
+	return labelNamesMap, nil
+}
+
+// LabelNames returns all the unique label names present in the DB in sorted order.
+func (db *DB) LabelNames() ([]string, error) {
+	brs := []BlockReader{db.head}
+	for _, b := range db.Blocks() {
+		brs = append(brs, b)
+	}
+
+	labelNamesMap, err := labelNames(brs...)
+	if err != nil {
+		return nil, err
+	}
+
+	labelNames := make([]string, 0, len(labelNamesMap))
+	for name := range labelNamesMap {
+		labelNames = append(labelNames, name)
+	}
+	sort.Strings(labelNames)
+
+	return labelNames, nil
 }
 
 func isBlockDir(fi os.FileInfo) bool {
