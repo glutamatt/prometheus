@@ -532,7 +532,7 @@ func (db *DB) reload() (err error) {
 	sort.Slice(blocks, func(i, j int) bool {
 		return blocks[i].Meta().MinTime < blocks[j].Meta().MinTime
 	})
-	if err := validateBlockSequence(blocks); err != nil {
+	if err := validateBlockSequence(blocks, db.dir); err != nil {
 		return errors.Wrap(err, "invalid block sequence")
 	}
 
@@ -570,7 +570,7 @@ func (db *DB) reload() (err error) {
 }
 
 // validateBlockSequence returns error if given block meta files indicate that some blocks overlaps within sequence.
-func validateBlockSequence(bs []*Block) error {
+func validateBlockSequence(bs []*Block, dir string) error {
 	if len(bs) <= 1 {
 		return nil
 	}
@@ -582,6 +582,9 @@ func validateBlockSequence(bs []*Block) error {
 
 	overlaps := OverlappingBlocks(metas)
 	if len(overlaps) > 0 {
+		for a := range overlaps {
+			os.RemoveAll(fmt.Sprintf("%s/%s", dir, overlaps[a][0].ULID.String()))
+		}
 		return errors.Errorf("block time ranges overlap: %s", overlaps)
 	}
 
